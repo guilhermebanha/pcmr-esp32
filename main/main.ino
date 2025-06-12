@@ -4,6 +4,9 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
+#define publishInterval 1000; // 1 second
+
+
 // #define WIFI_SSID "Osmanthus Wine"
 // #define WIFI_PASSWORD "6GEoarchon03"
 // #define MQTT_BROKER "192.168.1.67"
@@ -154,8 +157,9 @@ void setup() {
   mqtt_handler.init("Bankai", "alguemnao", "192.168.118.102", 1883, "heartbit/bpm");
 }
 
-void loop() {
 
+void loop() {
+  static unsigned long lastPublishTime = 0; // Keep track of the last publish time
   if (!mqtt_handler.getClient()->connected()) {
     mqtt_handler.doConnect();
   }
@@ -163,16 +167,25 @@ void loop() {
 
   hs.updateBPM();
   int curr = hs.getBPM();
-  if (hs.isValid() && !(hs.checkFinger())) {
-    Serial.println(curr);
-    // Create JSON payload
-    String payload = "{\"bpm\":";
-    payload += curr;
-    payload += "}";
 
-    // Publish
-    mqtt_handler.getClient()->publish(mqtt_handler.getTopic(), payload.c_str());
+  if (hs.isValid() && !(hs.checkFinger())) {
+    unsigned long currentTime = millis();
+    if (currentTime - lastPublishTime >= publishInterval) {
+      Serial.println(curr);
+      
+      // Create JSON payload
+      String payload = "{\"bpm\":";
+      payload += curr;
+      payload += "}";
+
+      // Publish
+      mqtt_handler.getClient()->publish(mqtt_handler.getTopic(), payload.c_str());
+      
+      // Update last publish time
+      lastPublishTime = currentTime;
+    }
   }
 
-  delay(20);
+  delay(20); // Short delay to avoid tight looping
 }
+
