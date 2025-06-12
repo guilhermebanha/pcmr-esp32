@@ -1,7 +1,87 @@
 #include <Wire.h>
 #include "MAX30105.h"
 #include "heartRate.h"
+#include <WiFi.h>
+#include <PubSubClient.h>
 
+// #define WIFI_SSID "Osmanthus Wine"
+// #define WIFI_PASSWORD "6GEoarchon03"
+// #define MQTT_BROKER "192.168.1.67"
+// #define MQTT_PORT 1883
+// #define MQTT_TOPIC "heartbit/bpm"
+class MQTTHandler {
+private:
+  WiFiClient* espClient;
+  PubSubClient* client;
+  char* topic;
+  char* ssid;
+  char* pwd;
+  char* server;
+  int port;
+public:
+  MQTTHandler() {}
+  void init(char* ssid, char* pwd, char* server, int port, char* topic) {
+    // Default values for first time
+    this->setSSID(ssid);
+    this->setPWD(pwd);
+    this->setServer(server);
+    this->setPort(port);
+    this->setTopic(topic);
+    this->espClient = new WiFiClient();
+    this->client = new PubSubClient(*this->espClient);
+  }
+  void setTopic(char* topic) {
+    this->topic = topic;
+  }
+  void setSSID(char* ssid) {
+    this->ssid = ssid;
+  }
+  void setPWD(char* pwd) {
+    this->pwd = pwd;
+  }
+  void setServer(char* server) {
+    this->server = server;
+  }
+  void setPort(int port) {
+    this->port = port;
+  }
+  char* getTopic() {
+    return this->topic;
+  }
+  PubSubClient* getClient() {
+    return this->client;
+  }
+  void doConnect() {
+    connectWiFi();
+    connectMQTT();
+  }
+
+  void connectWiFi() {
+    Serial.print("Connecting to WiFi...");
+    WiFi.begin(this->ssid, this->pwd);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println(" connected!");
+  }
+
+
+  void connectMQTT() {
+    this->client->setServer(this->server, this->port);
+    while (!(this->client->connected())) {
+      Serial.print("Connecting to MQTT...");
+      if (this->client->connect("ESP32Client")) {
+        Serial.println(" connected!");
+      } else {
+        Serial.print(" failed, rc=");
+        Serial.print(this->client->state());
+        delay(2000);
+      }
+    }
+  }
+};
+// HeartSensor class (same as before)
 class HeartSensor {
 private:
   uint8_t FLAG_MISBPM;
@@ -24,25 +104,23 @@ public:
       while (1)
         ;
     }
-    this->particleSensor.setup();                     // Configure sensor with default settings
-    this->particleSensor.setPulseAmplitudeRed(0x0A);  // Turn Red LED to low to indicate sensor is running
-    this->particleSensor.setPulseAmplitudeGreen(0);   // Turn off Green LED
+    this->particleSensor.setup();
+    this->particleSensor.setPulseAmplitudeRed(0x0A);
+    this->particleSensor.setPulseAmplitudeGreen(0);
   }
   void updateBPM() {
     this->irValue = this->particleSensor.getIR();
 
     if (checkForBeat(this->irValue) == true) {
-      // We sensed a beat!
       long delta = millis() - lastBeat;
       lastBeat = millis();
 
       this->beatsPerMinute = 60 / (delta / 1000.0);
 
       if (this->beatsPerMinute < 255 && this->beatsPerMinute > 20) {
-        this->rates[this->rateSpot++] = (byte)this->beatsPerMinute;  // Store this reading in the array
-        this->rateSpot %= 4;                                         // Wrap variable
+        this->rates[this->rateSpot++] = (byte)this->beatsPerMinute;
+        this->rateSpot %= 4;
 
-        // Take average of readings
         this->beatAvg = 0;
         for (byte x = 0; x < 4; x++)
           this->beatAvg += rates[x];
@@ -54,32 +132,47 @@ public:
     this->FLAG_MISBPM = FLAG_MISBPM;
   }
   float getBPM() {
-    if (this->beatsPerMinute) return this->beatsPerMinute;
+    return this->beatsPerMinute;
   }
   float getAVG() {
-    if (this->beatAvg) return this->beatAvg;
+    return this->beatAvg;
   }
   int checkFinger() {
-    if (this->irValue < 50000) return 1;
-    else return 0;
+    return this->irValue < 50000 ? 1 : 0;
   }
-
   bool isValid() {
-    if (this->getBPM() >= this->FLAG_MISBPM) return true;
-    return false;
+    return this->getBPM() >= this->FLAG_MISBPM;
   }
 };
 
 HeartSensor hs;
+MQTTHandler mqtt_handler;
 void setup() {
   Serial.begin(9600);
   hs.init();
   hs.setFLAG_MISBPM(60);
+  mqtt_handler.init("Bankai", "alguemnao", "192.168.118.102", 1883, "heartbit/bpm");
 }
 
 void loop() {
+
+  if (!mqtt_handler.getClient()->connected()) {
+    mqtt_handler.doConnect();
+  }
+  mqtt_handler.getClient()->loop();
+
   hs.updateBPM();
   int curr = hs.getBPM();
-  if (hs.isValid() && !(hs.checkFinger())) Serial.println(curr);
+  if (hs.isValid() && !(hs.checkFinger())) {
+    Serial.println(curr);
+    // Create JSON payload
+    String payload = "{\"bpm\":";
+    payload += curr;
+    payload += "}";
+
+    // Publish
+    mqtt_handler.getClient()->publish(mqtt_handler.getTopic(), payload.c_str());
+  }
+
   delay(20);
 }
