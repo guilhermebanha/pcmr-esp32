@@ -3,8 +3,10 @@
 #include "heartRate.h"
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <CRC32.h>
 
-#define publishInterval 1000 // 1 second
+
+#define publishInterval 1000  // 1 second
 
 
 // #define WIFI_SSID "Osmanthus Wine"
@@ -150,6 +152,7 @@ public:
 
 HeartSensor hs;
 MQTTHandler mqtt_handler;
+CRC32 crc;
 void setup() {
   Serial.begin(9600);
   hs.init();
@@ -171,20 +174,21 @@ void loop() {
     unsigned long currentTime = millis();
     if (currentTime - lastPublishTime >= publishInterval) {
       Serial.println(curr);
-      
+
       // Create JSON payload
       String payload = "{\"bpm\":";
       payload += curr;
       payload += "}";
+      uint32_t checksum = crc.calculate((uint8_t*)payload.c_str(), payload.length());
+      payload = "{\"bpm\":" + String(curr) + ",\"crc32\":\"0x" + String(checksum, HEX) + "\"}";
 
       // Publish
       mqtt_handler.getClient()->publish(mqtt_handler.getTopic(), payload.c_str());
-      
+
       // Update last publish time
       lastPublishTime = currentTime;
     }
   }
 
-  delay(20); // Short delay to avoid tight looping
+  delay(20);  // Short delay to avoid tight looping
 }
-
