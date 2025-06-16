@@ -4,7 +4,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-#define publishInterval 1000; // 1 second
+#define publishInterval 1000 // 1 second
 
 
 // #define WIFI_SSID "Osmanthus Wine"
@@ -156,17 +156,16 @@ void setup() {
   hs.setFLAG_MISBPM(60);
   mqtt_handler.init("Bankai", "alguemnao", "192.168.118.102", 1883, "heartbit/bpm");
 }
-
+unsigned long lastPublishTime = 0;
 
 void loop() {
-  static unsigned long lastPublishTime = 0; // Keep track of the last publish time
   if (!mqtt_handler.getClient()->connected()) {
     mqtt_handler.doConnect();
   }
   mqtt_handler.getClient()->loop();
 
   hs.updateBPM();
-  int curr = hs.getBPM();
+  int curr = hs.getAVG();
 
   if (hs.isValid() && !(hs.checkFinger())) {
     unsigned long currentTime = millis();
