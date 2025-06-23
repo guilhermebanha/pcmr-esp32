@@ -4,10 +4,55 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <CRC32.h>
-
+#include <DES.h>
 
 #define publishInterval 1000  // 1 second
 
+class DESHandler {
+private:
+  DES des;
+  uint8_t key[8];
+  
+  // Aplica padding PKCS#7
+  void applyPKCS7Padding(uint8_t* buffer, int dataLen, int paddedLen) {
+    uint8_t padValue = paddedLen - dataLen;
+    for (int i = dataLen; i < paddedLen; i++) {
+      buffer[i] = padValue;
+    }
+  }
+
+public:
+  // Construtor: define a chave
+  DESHandler(const char* keyStr) {
+    memcpy(key, keyStr, 8);
+  }
+
+  // Encripta texto completo, retorna HEX
+  String Encrypt(const String& plaintext) {
+    int dataLen = plaintext.length();
+    int paddedLen = ((dataLen + 7) / 8) * 8;
+
+    uint8_t buffer[paddedLen];
+    memset(buffer, 0, paddedLen);
+    memcpy(buffer, plaintext.c_str(), dataLen);
+
+    applyPKCS7Padding(buffer, dataLen, paddedLen);
+
+    uint8_t encrypted[paddedLen];
+    for (int i = 0; i < paddedLen; i += 8) {
+      des.encrypt(encrypted + i, buffer + i, key);
+    }
+
+    // Converter para HEX
+    String hexPayload = "";
+    for (int i = 0; i < paddedLen; i++) {
+      if (encrypted[i] < 16) hexPayload += "0";
+      hexPayload += String(encrypted[i], HEX);
+    }
+
+    return hexPayload;
+  }
+};
 
 // #define WIFI_SSID "Osmanthus Wine"
 // #define WIFI_PASSWORD "6GEoarchon03"
@@ -153,6 +198,7 @@ public:
 HeartSensor hs;
 MQTTHandler mqtt_handler;
 CRC32 crc;
+DESHandler desHandler("12345678");
 void setup() {
   Serial.begin(9600);
   hs.init();
@@ -173,16 +219,25 @@ void loop() {
   if (hs.isValid() && !(hs.checkFinger())) {
     unsigned long currentTime = millis();
     if (currentTime - lastPublishTime >= publishInterval) {
-      Serial.println(curr);
+
+      // Add a timestamp (in milliseconds since program start)
+      unsigned long timestamp = millis();
 
       // Create JSON payload
       String payload = "{\"bpm\":";
       payload += curr;
+      payload += ",\"timestamp\":";
+      payload += timestamp;
       payload += "}";
-      uint32_t checksum = crc.calculate((uint8_t*)payload.c_str(), payload.length());
-      payload = "{\"bpm\":" + String(curr) + ",\"crc32\":\"0x" + String(checksum, HEX) + "\"}";
 
-      // Publish
+      uint32_t checksum = crc.calculate((uint8_t*)payload.c_str(), payload.length());
+      payload = "{\"bpm\":" + String(curr) + 
+                ",\"timestamp\":" + String(timestamp) + 
+                ",\"crc32\":\"0x" + String(checksum, HEX) + "\"}";
+
+      payload = desHandler.Encrypt(payload);
+
+      // Publish encrypted payload
       mqtt_handler.getClient()->publish(mqtt_handler.getTopic(), payload.c_str());
 
       // Update last publish time
@@ -192,3 +247,4 @@ void loop() {
 
   delay(20);  // Short delay to avoid tight looping
 }
+
