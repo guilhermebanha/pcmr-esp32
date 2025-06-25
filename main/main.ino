@@ -5,15 +5,83 @@
 #include <PubSubClient.h>
 #include <CRC32.h>
 #include <DES.h>
+#include <WebServer.h>
+#include <WiFiAP.h>
 
 #define publishInterval 1000  // 1 second
+
+WebServer server(80);
+String ssidInput = "", passwordInput = "", ipInput = "";
+bool wifiConfigured = false;
+
+const char* portal_html = R"rawliteral(
+  <html>
+  <head>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f0f2f5;
+        padding: 20px;
+      }
+      h2 {
+        color: #333;
+      }
+      form {
+        background-color: #fff;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        max-width: 300px;
+      }
+      input[type="text"], input[type="password"] {
+        width: 100%;
+        padding: 8px;
+        margin: 8px 0;
+        border-radius: 5px;
+        border: 1px solid #ccc;
+      }
+      input[type="submit"] {
+        width: 100%;
+        padding: 10px;
+        background-color: #007BFF;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      input[type="submit"]:hover {
+        background-color: #0056b3;
+      }
+      .footer-link {
+        margin-top: 15px;
+        display: block;
+        text-align: center;
+        color: #007BFF;
+        text-decoration: none;
+      }
+      .footer-link:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>WiFi Setup</h2>
+    <form action="/set">
+      SSID:<br><input name="ssid" type="text"><br>
+      Password:<br><input name="pass" type="password"><br>
+      Server IP:<br><input name="ip" type="text" placeholder="e.g., 192.168.1.102"><br>
+      <input type="submit" value="Connect">
+    </form>
+    <a class="footer-link" href="https://www.google.com" target="_blank">Visit Google</a>
+  </body>
+  </html>
+)rawliteral";
 
 class DESHandler {
 private:
   DES des;
   uint8_t key[8];
   
-  // Aplica padding PKCS#7
   void applyPKCS7Padding(uint8_t* buffer, int dataLen, int paddedLen) {
     uint8_t padValue = paddedLen - dataLen;
     for (int i = dataLen; i < paddedLen; i++) {
@@ -22,12 +90,10 @@ private:
   }
 
 public:
-  // Construtor: define a chave
   DESHandler(const char* keyStr) {
     memcpy(key, keyStr, 8);
   }
 
-  // Encripta texto completo, retorna HEX
   String Encrypt(const String& plaintext) {
     int dataLen = plaintext.length();
     int paddedLen = ((dataLen + 7) / 8) * 8;
@@ -43,7 +109,6 @@ public:
       des.encrypt(encrypted + i, buffer + i, key);
     }
 
-    // Converter para HEX
     String hexPayload = "";
     for (int i = 0; i < paddedLen; i++) {
       if (encrypted[i] < 16) hexPayload += "0";
@@ -54,11 +119,6 @@ public:
   }
 };
 
-// #define WIFI_SSID "Osmanthus Wine"
-// #define WIFI_PASSWORD "6GEoarchon03"
-// #define MQTT_BROKER "192.168.1.67"
-// #define MQTT_PORT 1883
-// #define MQTT_TOPIC "heartbit/bpm"
 class MQTTHandler {
 private:
   WiFiClient* espClient;
@@ -71,7 +131,6 @@ private:
 public:
   MQTTHandler() {}
   void init(char* ssid, char* pwd, char* server, int port, char* topic) {
-    // Default values for first time
     this->setSSID(ssid);
     this->setPWD(pwd);
     this->setServer(server);
@@ -116,7 +175,6 @@ public:
     Serial.println(" connected!");
   }
 
-
   void connectMQTT() {
     this->client->setServer(this->server, this->port);
     while (!(this->client->connected())) {
@@ -131,7 +189,7 @@ public:
     }
   }
 };
-// HeartSensor class (same as before)
+
 class HeartSensor {
 private:
   uint8_t FLAG_MISBPM;
@@ -151,8 +209,7 @@ public:
   void init() {
     if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
       Serial.println("GY-MAX30100 was not found. Please check wiring/power.");
-      while (1)
-        ;
+      while (1);
     }
     this->particleSensor.setup();
     this->particleSensor.setPulseAmplitudeRed(0x0A);
@@ -199,15 +256,63 @@ HeartSensor hs;
 MQTTHandler mqtt_handler;
 CRC32 crc;
 DESHandler desHandler("12345678");
+
 void setup() {
   Serial.begin(9600);
   hs.init();
   hs.setFLAG_MISBPM(60);
-  mqtt_handler.init("Bankai", "alguemnao", "192.168.118.102", 1883, "heartbit/bpm");
+
+  WiFi.softAP("HeartMonitor_Config");
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  server.on("/", []() {
+    server.send(200, "text/html", portal_html);
+  });
+
+  server.on("/set", []() {
+    ssidInput = server.arg("ssid");
+    passwordInput = server.arg("pass");
+    ipInput = server.arg("ip");
+
+    server.send(200, "text/html", "<h1>Trying to connect...</h1>");
+
+    WiFi.begin(ssidInput.c_str(), passwordInput.c_str());
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries < 20) {
+      delay(500);
+      Serial.print(".");
+      tries++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Connected to WiFi!");
+      wifiConfigured = true;
+
+      mqtt_handler.init((char*)ssidInput.c_str(), (char*)passwordInput.c_str(),
+                        (char*)ipInput.c_str(), 1883, (char*)"heartbit/bpm");
+    } else {
+      Serial.println("Failed to connect.");
+    }
+  });
+
+  server.begin();
+
+  while (!wifiConfigured) {
+    server.handleClient();
+    delay(10);
+  }
 }
+
 unsigned long lastPublishTime = 0;
 
 void loop() {
+  if (!wifiConfigured) {
+    server.handleClient();
+    return;
+  }
+
   if (!mqtt_handler.getClient()->connected()) {
     mqtt_handler.doConnect();
   }
@@ -219,11 +324,8 @@ void loop() {
   if (hs.isValid() && !(hs.checkFinger())) {
     unsigned long currentTime = millis();
     if (currentTime - lastPublishTime >= publishInterval) {
-
-      // Add a timestamp (in milliseconds since program start)
       unsigned long timestamp = millis();
 
-      // Create JSON payload
       String payload = "{\"bpm\":";
       payload += curr;
       payload += ",\"timestamp\":";
@@ -237,14 +339,10 @@ void loop() {
 
       payload = desHandler.Encrypt(payload);
 
-      // Publish encrypted payload
       mqtt_handler.getClient()->publish(mqtt_handler.getTopic(), payload.c_str());
-
-      // Update last publish time
       lastPublishTime = currentTime;
     }
   }
 
-  delay(20);  // Short delay to avoid tight looping
+  delay(20);
 }
-
