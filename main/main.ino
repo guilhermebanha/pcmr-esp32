@@ -92,6 +92,40 @@ const char* portal_html = R"rawliteral(
 //================================================
 
 //==================CLASSES=======================
+
+class GPSHandler {
+private:
+  TinyGPSPlus gps;
+  HardwareSerial& gpsSerial;
+
+public:
+  GPSHandler(HardwareSerial& serial)
+    : gpsSerial(serial) {}
+
+  void begin() {
+    gpsSerial.begin(9600, SERIAL_8N1, 16, 17);
+  }
+
+  void update() {
+    while (gpsSerial.available() > 0) {
+      gps.encode(gpsSerial.read());
+    }
+  }
+
+  double getLat() {
+    return gps.location.isValid() ? gps.location.lat() : 0.0;
+  }
+
+  double getLon() {
+    return gps.location.isValid() ? gps.location.lng() : 0.0;
+  }
+
+  bool hasData() {
+    return gps.charsProcessed() > 10;
+  }
+};
+
+
 class DESHandler {
 private:
   DES des;
@@ -113,13 +147,13 @@ public:
     int dataLen = plaintext.length();
     int paddedLen = ((dataLen + 7) / 8) * 8;
 
-    uint8_t buffer[paddedLen];
+    uint8_t* buffer = new uint8_t[paddedLen];
     memset(buffer, 0, paddedLen);
     memcpy(buffer, plaintext.c_str(), dataLen);
 
     applyPKCS7Padding(buffer, dataLen, paddedLen);
 
-    uint8_t encrypted[paddedLen];
+    uint8_t* encrypted = new uint8_t[paddedLen];
     for (int i = 0; i < paddedLen; i += 8) {
       des.encrypt(encrypted + i, buffer + i, key);
     }
@@ -129,6 +163,9 @@ public:
       if (encrypted[i] < 16) hexPayload += "0";
       hexPayload += String(encrypted[i], HEX);
     }
+
+    delete[] buffer;
+    delete[] encrypted;
 
     return hexPayload;
   }
@@ -276,18 +313,22 @@ HeartSensor hs;
 MQTTHandler mqtt_handler;
 CRC32 crc;
 DESHandler desHandler("12345678");
-TinyGPSPlus gps;
-HardwareSerial GPSserial(2);
+GPSHandler myGPS(Serial2);
 // Variables
+String emergencyStatus = "null";
+bool statusSent = false;
 volatile bool simulate = false;
 volatile bool emergency = false;
 volatile bool emergencyC = false;
 unsigned long lastPublishTime = 0;
-double lat = 0;
-double lon = 0;
 unsigned long lastSInterruptTime = 0;
 unsigned long lastCInterruptTime = 0;
-
+bool isYellow = false;
+bool isGreen = false;
+bool isRed = false;
+unsigned long yellowStartTime = 0;
+unsigned long greenStartTime = 0;
+volatile bool cancelRequested = false;
 //================================================
 
 void IRAM_ATTR toggleSimulate() {
@@ -301,16 +342,27 @@ void IRAM_ATTR toggleSimulate() {
 void IRAM_ATTR cancelEmergncy() {
   unsigned long interruptTime = millis();
   if (interruptTime - lastCInterruptTime > 200) {
-    // Here do something also
+    cancelRequested = true;
     lastCInterruptTime = interruptTime;
   }
+}
+
+bool isCanceled() {
+  if (isGreen) {
+    return true;
+  } else if (isRed) {
+    return false;
+  }
+  return false;  // default
 }
 
 
 //==================ESP32 DEFAULT=================
 void setup() {
   Serial.begin(9600);
-  GPSserial.begin(9600, SERIAL_8N1, 16, 17);  // Check your GPS baud rate!
+  while (!Serial)
+    ;
+  myGPS.begin();
   hs.init();
   hs.setFLAG_MISBPM(60);
 
@@ -365,8 +417,16 @@ void setup() {
     delay(10);
   }
   pinMode(SPIN, INPUT_PULLUP);
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);  // Ensure it's off at startup
   attachInterrupt(digitalPinToInterrupt(SPIN), toggleSimulate, FALLING);
   attachInterrupt(digitalPinToInterrupt(CPIN), cancelEmergncy, FALLING);
+  pinMode(RED, OUTPUT);
+  pinMode(GREEN, OUTPUT);
+  pinMode(BLUE, OUTPUT);
+  digitalWrite(RED, LOW);
+  digitalWrite(GREEN, LOW);
+  digitalWrite(BLUE, HIGH);
 }
 
 void loop() {
@@ -382,20 +442,22 @@ void loop() {
   mqtt_handler.getClient()->loop();
 
   hs.updateBPM();
+  myGPS.update();
+
+  if (millis() > 5000 && !myGPS.hasData()) {
+    Serial.println("No GPS data received: check wiring");
+    while (true)
+      ;
+  }
+
+  double lat = myGPS.getLat();
+  double lon = myGPS.getLon();
 
   randomSeed(esp_random());
 
+  
   int bpm_value = simulate ? random(160, 201) : hs.getAVG();
 
-  while (GPSserial.available()) {
-    char c = GPSserial.read();
-    gps.encode(c);
-  }
-
-  if (gps.location.isUpdated()) {
-    lat = gps.location.lat();
-    lon = gps.location.lng();
-  }
 
   if ((hs.isValid() && !(hs.checkFinger())) || simulate == true) {
     unsigned long currentTime = millis();
@@ -408,26 +470,82 @@ void loop() {
       payload += lat;
       payload += ",\"lon\":";
       payload += lon;
+      payload += ",\"status\":";
+      payload += emergencyStatus;
       payload += ",\"timestamp\":";
       payload += timestamp;
       payload += "}";
 
       uint32_t checksum = crc.calculate((uint8_t*)payload.c_str(), payload.length());
-      payload = "{\"bpm\":" + String(bpm_value) + ",\"lat\":" + String(lat) + ",\"lon\":" + String(lon) + ",\"timestamp\":" + String(timestamp) + ",\"crc32\":\"0x" + String(checksum, HEX) + "\"}";
-
+      payload = "{\"bpm\":" + String(bpm_value) + ",\"lat\":" + String(lat) + ",\"lon\":" + String(lon) + ",\"status\":\"" + String(emergencyStatus) + "\",\"timestamp\":" + String(timestamp) + ",\"crc32\":\"0x" + String(checksum, HEX) + "\"}";
+      Serial.println(payload);
       payload = desHandler.Encrypt(payload);
 
       mqtt_handler.getClient()->publish(mqtt_handler.getTopic(), payload.c_str());
-      Serial.println(bpm_value);
-      Serial.println(payload);
       lastPublishTime = currentTime;
     }
   }
 
   delay(20);
 
-  if (bpm_value >= 110) {  // Oopsi Doopsie!
-    // Do here what i asked please
+  static bool emergencyTriggered = false;
+
+  if (bpm_value >= 110) {
+    if (!emergencyTriggered) {
+      emergencyTriggered = true;
+      isYellow = true;
+      yellowStartTime = millis();
+      analogWrite(RED, 64);
+      analogWrite(GREEN, 128);
+      analogWrite(BLUE, 0);
+      digitalWrite(BUZZER, HIGH);  // Start buzzer immediately
+    }
+
+    if (isYellow) {
+      if (cancelRequested) {
+        cancelRequested = false;
+        isYellow = false;
+        isGreen = true;
+        greenStartTime = millis();
+        analogWrite(RED, 0);
+        analogWrite(GREEN, 255);
+        analogWrite(BLUE, 0);
+
+        if (!statusSent) {
+          emergencyStatus = "false";
+          statusSent = true;
+        }
+      } else if (millis() - yellowStartTime >= 10000) {
+        isYellow = false;
+        isRed = true;
+        analogWrite(RED, 255);
+        analogWrite(GREEN, 0);
+        analogWrite(BLUE, 0);
+
+        if (!statusSent) {
+          emergencyStatus = "true";
+          statusSent = true;
+        }
+      }
+    }
+
+
+    // Green Phase: Cancel successful
+    if (isGreen) {
+      if (millis() - greenStartTime >= 10000) {
+        isGreen = false;
+        emergencyTriggered = false;
+        toggleSimulate();  // if this is intended
+        digitalWrite(BUZZER, LOW);
+        analogWrite(RED, 0);
+        analogWrite(GREEN, 0);
+        analogWrite(BLUE, 255);
+        emergencyStatus = "null";
+        statusSent = false;
+      }
+    }
+
+    // Red phase never auto-resets unless you add code here
   }
 }
 //================================================
