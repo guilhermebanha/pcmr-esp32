@@ -163,7 +163,7 @@ const char* portal_html = R"rawliteral(
         Server IP:<br><input name="ip" type="text" placeholder="e.g., 192.168.118.102"><br>
         <input type="submit" value="Connect">
       </form>
-      <a class="footer-link" href="https://www.google.com" target="_blank">Visit Google</a>
+      <a class="footer-link" href="https://documentation-orpin-nine.vercel.app/" target="_blank">Visit Google</a>
     </body>
     </html>
   )rawliteral";
